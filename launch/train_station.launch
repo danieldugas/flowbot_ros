@@ -1,0 +1,7 @@
+<launch>
+    <node pkg="flowbot_ros" type="ros_flowplanner" name="ros_flowplanner" args=""/>
+
+    <include file="$(find crowdbotsim)/launch/ros_sim_node.launch">
+        <arg name="rviz" value="true"/>
+    </include>
+</launch>

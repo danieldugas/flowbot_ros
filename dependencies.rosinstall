@@ -6,3 +6,7 @@
    local-name: catkin_crowdbotsim
    uri: https://gitlab.inria.fr/CrowdBot/catkin_crowdbotsim.git
    version: master
+- git:
+   local-name: catkin_simple
+   uri: https://github.com/catkin/catkin_simple.git
+   version: master
