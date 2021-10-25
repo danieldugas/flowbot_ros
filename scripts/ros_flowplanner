@@ -1,0 +1,361 @@
+#!/usr/bin/env python
+import numpy as np
+import rospy
+from CMap2D import CMap2D
+from pose2d import Pose2D, apply_tf, inverse_pose2d
+from tf.transformations import euler_from_quaternion
+import tf
+from tf2_ros import TransformException
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist, PoseStamped, Point
+from nav_msgs.msg import OccupancyGrid
+from costmap_converter.msg import ObstacleArrayMsg
+from visualization_msgs.msg import Marker, MarkerArray
+
+from flowplanner import FlowBasedPlanner # crowdbot-flow-planning
+
+class FlowPlannerNode(object):
+    def __init__(self):
+        rospy.init_node("flowplanner_node")
+        # constants
+        self.kRobotFrame = "/base_footprint"
+        self.planning_period = 0.1
+        self.control_period = 0.01
+        self.show_plot = False
+        # variables
+        self.goal_xy = None
+        self.tracked_persons = None
+        self.tracked_persons_stamp = None
+        self.lidar = None
+        self.refmap = None
+        self.refmap_frame = None
+        self.trajectory = None
+        self.planner = FlowBasedPlanner(version=9)
+        # publishers
+        self.cmd_vel_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+        self.debug_vx_pub = rospy.Publisher("/flow/debug/vx", OccupancyGrid, queue_size=1)
+        self.debug_vy_pub = rospy.Publisher("/flow/debug/vy", OccupancyGrid, queue_size=1)
+        self.debug_rho_pub = rospy.Publisher("/flow/debug/rho", OccupancyGrid, queue_size=1)
+        self.debug_turb_pub = rospy.Publisher("/flow/debug/turb", OccupancyGrid, queue_size=1)
+        self.debug_meas_pub = rospy.Publisher("/flow/debug/meas", OccupancyGrid, queue_size=1)
+        self.debug_traj_pub = rospy.Publisher("/flow/debug/traj", MarkerArray, queue_size=1)
+        self.debug_best_vel_pub = rospy.Publisher("/flow/debug/best_vel", MarkerArray, queue_size=1)
+        self.debug_model_vel_pub = rospy.Publisher("/flow/debug/model_vel", MarkerArray, queue_size=1)
+        # subscribers
+        self.tf_listener = tf.TransformListener()
+        self.tf_timeout = rospy.Duration(1.)
+        rospy.Subscriber("/robot/dynamic_obstacles", ObstacleArrayMsg, self.obstacles_callback, queue_size=1)
+        rospy.Subscriber("/robot/laser_scan", LaserScan, self.lidar_callback, queue_size=1)
+        rospy.Subscriber("/move_base_simple/goal", PoseStamped, self.goal_callback, queue_size=1)
+        rospy.Subscriber("/sim/map", OccupancyGrid, self.map_callback, queue_size=1)
+        # Timers
+        rospy.Timer(rospy.Duration(self.planning_period), self.planning_loop)
+        rospy.Timer(rospy.Duration(self.control_period), self.follow_trajectory_loop)
+        # let's go.
+        try:
+            rospy.spin()
+        except KeyboardInterrupt:
+            print("Keyboard interrupt - shutting down.")
+            rospy.signal_shutdown('KeyboardInterrupt')
+
+    def obstacles_callback(self, msg):
+        if msg.header.frame_id != self.refmap_frame:
+            rospy.logwarn_throttle(
+                3, "Refusing obstacles msg: obstacles frame ({}) != reference map frame ({})".format(
+                    msg.header.frame_id, self.refmap_frame))
+            return
+        tracked_persons = np.zeros((len(msg.obstacles), 7))
+        for i, obst in enumerate(msg.obstacles):
+            id_ = obst.id
+            x = obst.polygon.points[0].x
+            y = obst.polygon.points[0].y
+            _, _, th = euler_from_quaternion([obst.orientation.x, obst.orientation.y,
+                                              obst.orientation.z, obst.orientation.w])
+            vx = obst.velocities.twist.linear.x
+            vy = obst.velocities.twist.linear.y
+            vth = obst.velocities.twist.angular.z
+            tracked_persons[i, 0] = id_
+            tracked_persons[i, 1] = x
+            tracked_persons[i, 2] = y
+            tracked_persons[i, 3] = th
+            tracked_persons[i, 4] = vx
+            tracked_persons[i, 5] = vy
+            tracked_persons[i, 6] = vth
+        self.tracked_persons = tracked_persons
+        self.tracked_persons_stamp = msg.header.stamp
+
+    def lidar_callback(self, msg):
+        """ lidar is used to determine the visible area for each crowd measurement.
+        unfortunately, no guarantees of sync between lidar and tracked persons topics.
+        It is recommended to manually check that the discrepancy is acceptable. """
+        # assert lidar_frame = robot_frame
+        self.lidar = msg
+
+    def goal_callback(self, msg):
+        if msg.header.frame_id != self.refmap_frame:
+            rospy.logwarn_throttle(3, "Refusing goal: goal frame ({}) != reference map frame ({})".format(
+                msg.header.frame_id, self.refmap_frame))
+            return
+        self.goal_xy = np.array([msg.pose.position.x, msg.pose.position.y])
+
+    def map_callback(self, msg):
+        """ map should be the reference map. It should not change as time advances """
+        rospy.loginfo_once("Reference map received.")
+        map2d = CMap2D()
+        map2d.from_msg(msg)
+        map2d = map2d.as_coarse_map2d(n=3)
+        walls = map2d.as_closed_obst_vertices()
+        walls = [wall.tolist() for wall in walls]
+        portals = []
+        self.planner.set_static_obstacles(walls, portals, refmap=map2d)
+        self.refmap = map2d
+        self.refmap_frame = msg.header.frame_id
+
+    def get_tf(self, child, parent, time=None):
+        try:
+            if time is None:
+                time = rospy.Time.now()
+            tf_info = [parent, child, time]
+            self.tf_listener.waitForTransform(*(tf_info + [self.tf_timeout]))
+            tf_msg_in_refmap = self.tf_listener.lookupTransform(*tf_info)
+        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException,
+                TransformException) as e:
+            print("[{}.{}] tf to refmap frame for time {}.{} not found: {}".format(
+                rospy.Time.now().secs, rospy.Time.now().nsecs, time.secs, time.nsecs, e))
+            return None
+        pose2d_child_in_parent = Pose2D(tf_msg_in_refmap)
+        return pose2d_child_in_parent
+
+    def planning_loop(self, event=None):
+        waiting = False
+        if self.lidar is None:
+            rospy.logwarn_throttle(3., "waiting for lidar")
+            waiting = True
+        if self.refmap is None:
+            rospy.logwarn_throttle(3., "waiting for reference map")
+            waiting = True
+        if self.goal_xy is None:
+            rospy.logwarn_throttle(3., "waiting for goal")
+            waiting = True
+        if self.tracked_persons is None:
+            rospy.logwarn_throttle(3., "waiting for tracked persons")
+            waiting = True
+        if waiting:
+            self.trajectory = None
+            return
+        robot_in_map = self.get_tf(self.kRobotFrame, self.refmap_frame)
+        if robot_in_map is None:
+            rospy.logwarn_throttle(3., "waiting for tf (robot in map)")
+            return
+        # consume inputs
+        x, y, th = robot_in_map
+        u, v, w = (0, 0, 0) # TODO use odom? OTOH flowplanner shouldn't care
+        goal = self.goal_xy
+        lidar = self.lidar
+        self.lidar = None
+        tracked_persons = self.tracked_persons
+        self.tracked_persons = None
+        measurement_time = self.tracked_persons_stamp.to_sec()
+        self.tracked_persons_stamp = None
+        time_step = self.planning_period
+        # pre-process inputs
+        angles = np.arange(lidar.angle_min, lidar.angle_max, lidar.angle_increment)
+        ranges = lidar.ranges
+        measured_surface = (robot_in_map, angles, ranges)
+        crowd = tracked_persons[:,:4]
+        crowd_odom = tracked_persons[:,1:7]
+        debug_dict = {}
+        # get desired velocity
+        speed, rot = self.planner.compute_cmd_vel(
+            crowd,
+            (x, y, th, u, v, w),
+            goal,
+            time_step,
+            measured_surface=measured_surface,
+            crowd_odom=crowd_odom,
+            measurement_time=measurement_time,
+            show_plot=self.show_plot,
+            debug_dict=debug_dict,
+        )
+        self.publish_debug_data(debug_dict)
+#         msg = Twist()
+#         msg.linear.x = speed
+#         msg.linear.y = 0
+#         msg.angular.z = rot
+#         self.cmd_vel_pub.publish(msg)
+        if "trajectory" in debug_dict:
+            self.trajectory = debug_dict["trajectory"]
+
+    def follow_trajectory_loop(self, event=None):
+        if self.trajectory is None:
+            msg = Twist()
+            self.cmd_vel_pub.publish(msg)
+            return
+        trajectory = self.trajectory
+        robot_in_map = self.get_tf(self.kRobotFrame, self.refmap_frame)
+        if robot_in_map is None:
+            return
+        if len(trajectory) == 0:
+            if self.goal_xy is None:
+                return
+            print("nudge")
+            # trajectory with goal as point, nudge vel should lead to nudge behavior
+            nudge_vel = 0.1
+            trajectory = np.array([[0, self.goal_xy[0], self.goal_xy[1], nudge_vel, 0]])
+        # controller orient toward next trajectory point instead of follow recommended vel
+        closest_id = np.argmin(np.linalg.norm(trajectory[:, 1:3] - robot_in_map[:2], axis=-1))
+        closest = trajectory[closest_id]
+        # step forward n times from closest point
+        carrot_idx = 4
+        carrot = trajectory[closest_id:][:carrot_idx][-1]
+        _, _, _, vx, vy = closest
+        carrot_in_robot = apply_tf(carrot[1:3][None, :], inverse_pose2d(robot_in_map))[0]
+        desired_vel_norm = np.sqrt(vx*vx + vy*vy)
+        desired_vel = carrot_in_robot / np.linalg.norm(carrot_in_robot) * desired_vel_norm
+        dvx, dvy = desired_vel
+        desired_angle = np.arctan2(dvy, dvx)
+        desired_rot = desired_angle
+        msg = Twist()
+        msg.linear.x = dvx
+        msg.linear.y = dvy
+        msg.angular.z = desired_rot
+        self.cmd_vel_pub.publish(msg)
+        # publish traj
+        color = [1., 0.5, 0., 1.] # rgba orange
+        points = trajectory[:, 1:3]
+        ma = MarkerArray()
+        frame = self.refmap_frame
+        ma.markers.append(path_as_marker(points, frame, 0.02, "trajectory", id_=0, color=color))
+        ma.markers.append(point_as_marker(carrot[1:3], frame, 0.05, "carrot", id_=1, color=color))
+        ma.markers.append(point_as_marker(closest[1:3], frame, 0.05, "closest", id_=2, color=color))
+        self.debug_traj_pub.publish(ma)
+
+    def publish_debug_data(self, debug_dict):
+        if "measurement_time" not in debug_dict:
+            return
+        stamp = rospy.Time(debug_dict["measurement_time"])
+        if "measurement_grid" in debug_dict:
+            array = debug_dict["measurement_grid"]
+            array = array / (np.max(array) + 0.00001) 
+            array = np.clip(array, 0, 1)
+            msg = self.refmap.numpy_to_occupancy_grid_msg(
+                array, self.refmap_frame, stamp)
+            self.debug_meas_pub.publish(msg)
+        if "rhogrid" in debug_dict:
+            array = debug_dict["rhogrid"]
+            array = array / (np.max(array) + 0.00001)
+            array = np.clip(array, 0, 1)
+            msg = self.refmap.numpy_to_occupancy_grid_msg(
+                array, self.refmap_frame, stamp)
+            self.debug_rho_pub.publish(msg)
+        if "vxgrid" in debug_dict:
+            array = debug_dict["vxgrid"]
+            array = array / (np.max(array) + 0.00001)
+            array = np.clip(array, -1, 1)
+            msg = self.refmap.numpy_to_occupancy_grid_msg(
+                array, self.refmap_frame, stamp)
+            self.debug_vx_pub.publish(msg)
+        if "vygrid" in debug_dict:
+            array = debug_dict["vygrid"]
+            array = array / (np.max(array) + 0.00001)
+            array = np.clip(array, -1, 1)
+            msg = self.refmap.numpy_to_occupancy_grid_msg(
+                array, self.refmap_frame, stamp)
+            self.debug_vy_pub.publish(msg)
+        if "turbgrid" in debug_dict:
+            array = debug_dict["turbgrid"]
+            array = array / (np.max(array) + 0.00001)
+            array = np.clip(array, -1, 1)
+            msg = self.refmap.numpy_to_occupancy_grid_msg(
+                array, self.refmap_frame, stamp)
+            self.debug_turb_pub.publish(msg)
+        if "vrx" in debug_dict and "vry" in debug_dict:
+            xx, yy = self.refmap.as_meshgrid_xy()
+            odom = np.stack([xx, yy, debug_dict["vrx"], debug_dict["vry"]], axis=-1).reshape((-1, 4))
+            markerarray = odom_as_markerarray(odom, self.refmap_frame, "best_vel")
+            self.debug_best_vel_pub.publish(markerarray)
+        if "vxgrid" in debug_dict and "vygrid" in debug_dict:
+            xx, yy = self.refmap.as_meshgrid_xy()
+            odom = np.stack([xx, yy, debug_dict["vxgrid"], debug_dict["vygrid"]], axis=-1).reshape((-1, 4))
+            markerarray = odom_as_markerarray(odom, self.refmap_frame, "model_vel")
+            self.debug_model_vel_pub.publish(markerarray)
+
+def path_as_marker(path_xy, frame, scale, namespace, time=None, color=None, id_=0, z=0):
+    marker = Marker()
+    time = rospy.Time.now() if time is None else time
+    marker.header.stamp.secs = time.secs
+    marker.header.stamp.nsecs = time.nsecs
+    marker.header.frame_id = frame
+    marker.ns = namespace
+    marker.id = id_
+    if len(path_xy) == 0:
+        return Marker()
+    marker.type = 4 # LINE_STRIP
+    marker.action = 0
+    s = scale
+    marker.scale.x = s
+    marker.scale.y = s
+    marker.scale.z = s
+    if color is None:
+        marker.color.g = 1.
+        marker.color.a = 0.5
+    else:
+        marker.color.r = color[0]
+        marker.color.g = color[1]
+        marker.color.b = color[2]
+        marker.color.a = color[3]
+    marker.pose.orientation.w = 1
+    marker.points = [Point(xy[0], xy[1], z) for xy in path_xy]
+    return marker
+
+def point_as_marker(point_xy, frame, scale, namespace, time=None, color=None, id_=0, z=0):
+    marker = Marker()
+    time = rospy.Time.now() if time is None else time
+    marker.header.stamp.secs = time.secs
+    marker.header.stamp.nsecs = time.nsecs
+    marker.header.frame_id = frame
+    marker.ns = namespace
+    marker.id = id_
+    marker.type = marker.SPHERE
+    marker.action = 0
+    s = scale
+    marker.scale.x = s
+    marker.scale.y = s
+    marker.scale.z = s
+    if color is None:
+        marker.color.g = 1.
+        marker.color.a = 0.5
+    else:
+        marker.color.r = color[0]
+        marker.color.g = color[1]
+        marker.color.b = color[2]
+        marker.color.a = color[3]
+    marker.pose.position.x = point_xy[0]
+    marker.pose.position.y = point_xy[1]
+    marker.pose.orientation.w = 1
+    return marker
+
+def odom_as_markerarray(odom, frame, namespace, time=None, z=0):
+    ma = MarkerArray()
+    time = rospy.Time.now() if time is None else rospy.Time(time)
+    for i, (x, y, vx, vy) in enumerate(odom[::2]):
+        marker = Marker()
+        marker.header.stamp = time
+        marker.header.frame_id = frame
+        marker.ns = namespace
+        marker.id = i
+        marker.type = 0 # ARROW
+        marker.action = 0
+        marker.points = [Point(x, y, z), Point(x+vx, y+vy, z)]
+        marker.scale.x = 0.02
+        marker.scale.y = 0.1
+        marker.color.g = 1.
+        marker.color.a = 1.
+        marker.pose.orientation.w = 1
+        ma.markers.append(marker)
+    return ma
+
+
+if __name__ == "__main__":
+    np.set_printoptions(precision=2, suppress=True)
+    node = FlowPlannerNode()

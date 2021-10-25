@@ -1,0 +1,8 @@
+- git:
+   local-name: frame_soft
+   uri: https://git.rwth-aachen.de/sabarinath.mahadevan/frame_soft.git
+   version: messages_and_plugin_only
+- git:
+   local-name: catkin_crowdbotsim
+   uri: https://gitlab.inria.fr/CrowdBot/catkin_crowdbotsim.git
+   version: master
