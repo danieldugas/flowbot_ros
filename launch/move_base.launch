@@ -1,0 +1,19 @@
+<launch>
+  <include file="$(find crowdbotsim)/launch/ros_sim_node.launch">
+      <arg name="rviz" value="false"/>
+  </include>
+
+  <!-- move_base -->
+  <node pkg="move_base" type="move_base" respawn="true" name="move_base" output="screen">
+   <remap from="/map" to="/sim/map"/>
+   <rosparam file="$(find flowbot_ros)/params/costmap_common_params.yaml" command="load" ns="global_costmap" /> 
+   <rosparam file="$(find flowbot_ros)/params/costmap_common_params.yaml" command="load" ns="local_costmap" />
+   <rosparam file="$(find flowbot_ros)/params/local_costmap_params.yaml" command="load" />
+   <rosparam file="$(find flowbot_ros)/params/global_costmap_params.yaml" command="load" /> 
+   <param name="base_local_planner" value="teb_local_planner/TebLocalPlannerROS" />
+   <param name="controller_frequency" value="10.0" />
+   <rosparam file="$(find flowbot_ros)/params/base_local_planner_params.yaml" command="load" />
+  </node>
+
+  <node type="rviz" name="rviz" pkg="rviz" args="-d $(find crowdbotsim)/rviz/flowbot_move_base.rviz" output="log"/>
+</launch> 

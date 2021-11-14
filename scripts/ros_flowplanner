@@ -225,9 +225,9 @@ class FlowPlannerNode(object):
         points = trajectory[:, 1:3]
         ma = MarkerArray()
         frame = self.refmap_frame
-        ma.markers.append(path_as_marker(points, frame, 0.02, "trajectory", id_=0, color=color))
-        ma.markers.append(point_as_marker(carrot[1:3], frame, 0.05, "carrot", id_=1, color=color))
-        ma.markers.append(point_as_marker(closest[1:3], frame, 0.05, "closest", id_=2, color=color))
+        ma.markers.append(path_as_marker(points, frame, 0.1, "trajectory", id_=0, color=color))
+        ma.markers.append(point_as_marker(carrot[1:3], frame, 0.2, "carrot", id_=1, color=color))
+        ma.markers.append(point_as_marker(closest[1:3], frame, 0.2, "closest", id_=2, color=color))
         self.debug_traj_pub.publish(ma)
 
     def publish_debug_data(self, debug_dict):
