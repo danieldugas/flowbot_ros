@@ -6,6 +6,7 @@
   <!-- move_base -->
   <node pkg="move_base" type="move_base" respawn="true" name="move_base" output="screen">
    <remap from="/map" to="/sim/map"/>
+   <remap  from="/move_base/TebLocalPlannerROS/obstacles" to="/robot/dynamic_obstacles"/>
    <rosparam file="$(find flowbot_ros)/params/costmap_common_params.yaml" command="load" ns="global_costmap" /> 
    <rosparam file="$(find flowbot_ros)/params/costmap_common_params.yaml" command="load" ns="local_costmap" />
    <rosparam file="$(find flowbot_ros)/params/local_costmap_params.yaml" command="load" />

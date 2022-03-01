@@ -30,7 +30,11 @@ class FlowPlannerNode(object):
         self.refmap = None
         self.refmap_frame = None
         self.trajectory = None
-        self.planner = FlowBasedPlanner(version=9)
+        self.traj_age = 0
+        self.skip_every_n_traj = 0
+        version = 8
+        self.planner = FlowBasedPlanner(version=version)
+        print("Flow planner version {}".format(version))
         # publishers
         self.cmd_vel_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
         self.debug_vx_pub = rospy.Publisher("/flow/debug/vx", OccupancyGrid, queue_size=1)
@@ -39,8 +43,10 @@ class FlowPlannerNode(object):
         self.debug_turb_pub = rospy.Publisher("/flow/debug/turb", OccupancyGrid, queue_size=1)
         self.debug_meas_pub = rospy.Publisher("/flow/debug/meas", OccupancyGrid, queue_size=1)
         self.debug_traj_pub = rospy.Publisher("/flow/debug/traj", MarkerArray, queue_size=1)
+        self.debug_rvo_pub = rospy.Publisher("/flow/debug/rvo", MarkerArray, queue_size=1)
         self.debug_best_vel_pub = rospy.Publisher("/flow/debug/best_vel", MarkerArray, queue_size=1)
         self.debug_model_vel_pub = rospy.Publisher("/flow/debug/model_vel", MarkerArray, queue_size=1)
+        self.planner.controller.marker_publisher = self.debug_rvo_pub
         # subscribers
         self.tf_listener = tf.TransformListener()
         self.tf_timeout = rospy.Duration(1.)
@@ -165,6 +171,12 @@ class FlowPlannerNode(object):
         crowd = tracked_persons[:,:4]
         crowd_odom = tracked_persons[:,1:7]
         debug_dict = {}
+        if self.trajectory is not None and self.traj_age < self.skip_every_n_traj:
+            traj = self.trajectory
+            self.traj_age += 1
+        else:
+            traj = None
+            self.traj_age = 0
         # get desired velocity
         speed, rot = self.planner.compute_cmd_vel(
             crowd,
@@ -176,6 +188,7 @@ class FlowPlannerNode(object):
             measurement_time=measurement_time,
             show_plot=self.show_plot,
             debug_dict=debug_dict,
+            preplanned_traj=traj,
         )
         self.publish_debug_data(debug_dict)
 #         msg = Twist()
