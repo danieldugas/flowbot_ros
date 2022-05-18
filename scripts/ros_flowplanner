@@ -32,7 +32,7 @@ class FlowPlannerNode(object):
         self.trajectory = None
         self.traj_age = 0
         self.skip_every_n_traj = 0
-        version = 8
+        version = 11 # NOCOMMIT
         self.planner = FlowBasedPlanner(version=version)
         print("Flow planner version {}".format(version))
         # publishers

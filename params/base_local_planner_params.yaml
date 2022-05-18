@@ -9,6 +9,15 @@
 #   acc_lim_y: 2.5
 #
 #   holonomic_robot: true
+#
+planner_frequency: 10
+
+DWAPlannerROS:
+ max_vel_x: 1.0
+ max_vel_x_backwards: 0.2
+ max_vel_trans: 1.0
+ max_vel_y: 0.0
+ max_vel_theta: 0.3
 
 TebLocalPlannerROS:
 
@@ -26,8 +35,8 @@ TebLocalPlannerROS:
     
  # Robot
          
- max_vel_x: 0.5
- max_vel_x_backwards: 0.2
+ max_vel_x: 1.
+ max_vel_x_backwards: 0.
  max_vel_y: 0.0
  max_vel_theta: 0.3
  acc_lim_x: 1.
@@ -54,7 +63,7 @@ TebLocalPlannerROS:
  # Obstacles
     
 #  min_obstacle_dist: 0.1
- include_costmap_obstacles: True
+ include_costmap_obstacles: False
  include_dynamic_obstacles: True
  costmap_obstacles_behind_robot_dist: 1.0
  obstacle_poses_affected: 30
@@ -64,8 +73,8 @@ TebLocalPlannerROS:
 
  # Optimization
     
- no_inner_iterations: 5
- no_outer_iterations: 4
+ no_inner_iterations: 3
+ no_outer_iterations: 2
  optimization_activate: True
  optimization_verbose: False
  penalty_epsilon: 0.1
@@ -83,12 +92,12 @@ TebLocalPlannerROS:
 
  # Homotopy Class Planner
 
- enable_homotopy_class_planning: True
+ enable_homotopy_class_planning: False
  enable_multithreading: True
- simple_exploration: False
+ simple_exploration: True
  max_number_classes: 4
- roadmap_graph_no_samples: 15
- roadmap_graph_area_width: 5
+ roadmap_graph_no_samples: 10
+ roadmap_graph_area_width: 2
  h_signature_prescaler: 0.5
  h_signature_threshold: 0.1
  obstacle_keypoint_offset: 0.1
